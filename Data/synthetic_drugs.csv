@@ -1,0 +1,3 @@
+drug_name,dose_range_min,dose_range_max,efficacy_model,side_effect_model
+Statin,0,40,-0.01 * dose,(dose / 40)**2
+Beta-blocker,0,20,0.2 * dose,(dose / 20)**2
