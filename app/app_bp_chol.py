@@ -1,5 +1,5 @@
 # project/app/app.py
-# Streamlit demo: DS1 Screening + Treatment Optimization (RestingBP, Oldpeak)
+# Streamlit demo: DS1 Screening + Treatment Optimization (RestingBP, Cholesterol)
 # Optional: DS2 Prognosis + Risk Score Bridge (if artifacts exist)
 
 import json
@@ -16,9 +16,9 @@ import importlib.util
 # =========================
 APP_DIR = Path(__file__).resolve().parent           
 ROOT = APP_DIR.parent                                
-DATA_DIR = ROOT / "Data"
+DATA_DIR = ROOT / "data"
 MODEL_DIR = DATA_DIR / "models"                      
-CORE_FILE = ROOT / "Core" / "intervention_core_optimized.py"  
+CORE_FILE = ROOT / "Core" / "intervention_core_optimized_bp_chol.py"  
 
 # DS1
 DS1_MODEL_PATH = MODEL_DIR / "best_ds1_RandomForest.pkl"
@@ -35,7 +35,7 @@ RISK_BRIDGE_COEF_CSV = MODEL_DIR / "risk_score_bridge_coef_or.csv"
 DS1_DATA_CANDIDATES = [
     DATA_DIR / "heart.csv",
     DATA_DIR / "heartcsv",  # if you used that name
-    DATA_DIR / "heart_failure_clinical_records_dataset.csv",  # not DS1 but keep as fallback
+    DATA_DIR / "heart_failure_clinical_records_dataset.csv",  
 ]
 
 st.set_page_config(page_title="Cardiovascular Risk Demo", layout="wide")
@@ -49,7 +49,7 @@ def load_core(core_path: Path):
     if not core_path.exists():
         raise FileNotFoundError(f"Missing core file: {core_path}")
 
-    spec = importlib.util.spec_from_file_location("intervention_core_optimixed", str(core_path))
+    spec = importlib.util.spec_from_file_location("intervention_core_optimized", str(core_path))
     module = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
     spec.loader.exec_module(module)
@@ -65,59 +65,36 @@ from sklearn.base import BaseEstimator, TransformerMixin
 
 class IQRClipper(BaseEstimator, TransformerMixin):
     """
-    Clip outliers using IQR rule:
-      lower = Q1 - k*IQR
-      upper = Q3 + k*IQR
-    Works with pandas DataFrame.
+    Version tương thích với notebook lúc train:
+    - fit() tính lower_/upper_ theo IQR trên TRAIN
+    - transform() clip bằng np.clip
     """
-    def __init__(self, columns=None, k=1.5):
-        self.columns = columns
-        self.k = k
+
+    def __init__(self, factor=1.5):
+        self.factor = factor
+        # lower_/upper_ sẽ được nạp từ pickle nếu model đã fit và serialize
 
     def fit(self, X, y=None):
-        import pandas as pd
-        Xdf = X.copy()
-        if not isinstance(Xdf, pd.DataFrame):
-            Xdf = pd.DataFrame(Xdf)
-
-        # If columns not specified, clip numeric columns
-        if self.columns is None:
-            cols = Xdf.select_dtypes(include=[np.number]).columns.tolist()
-        else:
-            cols = list(self.columns)
-
-        self.columns_ = cols
-        self.bounds_ = {}
-
-        for c in self.columns_:
-            s = pd.to_numeric(Xdf[c], errors="coerce")
-            q1 = np.nanquantile(s, 0.25)
-            q3 = np.nanquantile(s, 0.75)
-            iqr = q3 - q1
-            lo = q1 - self.k * iqr
-            hi = q3 + self.k * iqr
-            self.bounds_[c] = (float(lo), float(hi))
-
+        X = np.asarray(X, dtype=float)
+        q1 = np.nanpercentile(X, 25, axis=0)
+        q3 = np.nanpercentile(X, 75, axis=0)
+        iqr = q3 - q1
+        self.lower_ = q1 - self.factor * iqr
+        self.upper_ = q3 + self.factor * iqr
         return self
 
     def transform(self, X):
-        import pandas as pd
-        Xdf = X.copy()
-        if not isinstance(Xdf, pd.DataFrame):
-            Xdf = pd.DataFrame(Xdf)
+        X = np.asarray(X, dtype=float)
 
-        # If fit chưa chạy (trường hợp hiếm), cố gắng không làm gì
-        cols = getattr(self, "columns_", None)
-        bounds = getattr(self, "bounds_", None)
-        if not cols or not bounds:
-            return Xdf
+        # Trường hợp bình thường: model pickle đã có lower_/upper_
+        lower = getattr(self, "lower_", None)
+        upper = getattr(self, "upper_", None)
+        if lower is not None and upper is not None:
+            return np.clip(X, lower, upper)
 
-        for c in cols:
-            if c in Xdf.columns:
-                lo, hi = bounds[c]
-                Xdf[c] = pd.to_numeric(Xdf[c], errors="coerce").clip(lo, hi)
-
-        return Xdf
+        # Fallback an toàn (đỡ “toang” nếu pickle khác version):
+        # nếu có bounds_ (dict) thì không can thiệp vì không map cột được trong numpy array
+        return X
 
 
 @st.cache_resource
@@ -221,11 +198,10 @@ def make_schema_from_data_or_default(df_ds1: pd.DataFrame | None, use_numeric_ca
 
 
 def risk_group_from_p(p: float) -> str:
-    # You can adjust thresholds to match your report
-    if p < 0.33:
+    if p < 0.25:
         return "Low"
-    if p < 0.66:
-        return "Medium"
+    if p < 0.75:
+        return "Moderate"
     return "High"
 
 
@@ -259,9 +235,9 @@ def build_patient_input(feature_cols: list[str], schema: dict) -> dict:
                 if col == "Age":
                     patient[col] = num_int(col, 1, 120, 50)
                 elif col == "RestingBP":
-                    patient[col] = num_int(col, 50, 250, 130)
+                    patient[col] = num_int(col, 80, 200, 130)
                 elif col == "Cholesterol":
-                    patient[col] = num_int(col, 0, 800, 200)
+                    patient[col] = num_int(col, 90, 600, 200)
                 elif col == "MaxHR":
                     patient[col] = num_int(col, 40, 250, 150)
                 elif col == "Oldpeak":

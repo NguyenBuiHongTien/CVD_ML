@@ -10,22 +10,25 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 # Bạn có thể override khi gọi optimize_intervention_multi(lam=...)
 DEFAULT_LAMBDA: float = 0.02
 
+# Treat dataset-specific 0 values as missing for these columns
+ZERO_AS_MISSING = {"Cholesterol", "RestingBP"}
+
 
 # (Giữ lại cấu hình đầy đủ để tham chiếu)
 INTERVENTION_VARS_DS1_ALL: List[Dict[str, Any]] = [
     {
         "name": "RestingBP",
         "delta_bounds": (-60.0, 0.0),
-        "scale": 30.0,
+        "scale": 5.0,
         "min_value": 80.0,
-        "max_value": None,
+        "max_value": 200.0,
     },
     {
         "name": "Cholesterol",
         "delta_bounds": (-150.0, 0.0),
-        "scale": 100.0,
+        "scale": 10.0,
         "min_value": 90.0,
-        "max_value": None,
+        "max_value": 600.0,
     },
     {
         "name": "Oldpeak",
@@ -36,11 +39,11 @@ INTERVENTION_VARS_DS1_ALL: List[Dict[str, Any]] = [
     },
 ]
 
-# Mặc định tối ưu RestingBP + Oldpeak.
-# Lý do: bạn đã quan sát Cholesterol có quan hệ ngược trong mô hình hiện tại (giảm Chol làm risk tăng).
+# Mặc định tối ưu 2 biến có tính can thiệp lâm sàng rõ ràng: RestingBP + Cholesterol.
+# (Oldpeak được giữ trong *_ALL để tham chiếu/mở rộng nếu cần.)
 INTERVENTION_VARS_DS1: List[Dict[str, Any]] = [
     INTERVENTION_VARS_DS1_ALL[0],  # RestingBP
-    INTERVENTION_VARS_DS1_ALL[2],  # Oldpeak
+    INTERVENTION_VARS_DS1_ALL[1],  # Cholesterol
 ]
 
 
@@ -93,6 +96,10 @@ def predict_heart_risk(
     """
     row = {c: patient_features.get(c, np.nan) for c in feature_cols}
     X = pd.DataFrame([row])
+    # Normalize missing encoding: 0 -> NaN for selected columns
+    for c in ZERO_AS_MISSING:
+        if c in X.columns:
+            X.loc[X[c] == 0, c] = np.nan
     proba = pipe.predict_proba(X)[0, 1]
     return float(proba)
 
@@ -116,7 +123,8 @@ def intervention_objective_multi(
     # Nếu có NaN ở biến can thiệp -> phạt lớn (không tối ưu trên điểm dữ liệu lỗi)
     for spec in var_specs:
         name = spec["name"]
-        if name not in base_patient or pd.isna(base_patient.get(name)):
+        v = base_patient.get(name)
+        if name not in base_patient or pd.isna(v) or (name in ZERO_AS_MISSING and float(v)==0.0):
             return 1e6
 
     # Áp delta có clamp để tránh drift; nếu clamp làm thay đổi nhiều, penalty vẫn tính theo delta gốc
@@ -170,6 +178,8 @@ def optimize_intervention_multi(
         var_specs = INTERVENTION_VARS_DS1
 
     var_specs = list(var_specs)
+
+    
     n_vars = len(var_specs)
     bounds: List[Tuple[float, float]] = [tuple(map(float, spec["delta_bounds"])) for spec in var_specs]
 
